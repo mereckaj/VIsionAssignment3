@@ -8,8 +8,7 @@
 #define FPS 25
 #define MS_PER_SEC 1000
 #define FRAME_SKIP 5
-#define INTER_FRAME_DELAY 5
-//#define INTER_FRAME_DELAY (MS_PER_SEC / FPS )
+#define INTER_FRAME_DELAY (MS_PER_SEC / FPS )
 
 const std::vector<std::string> fileNames = {
         "ObjectAbandonmentAndRemoval1.avi",
@@ -17,14 +16,31 @@ const std::vector<std::string> fileNames = {
 };
 const std::string videoFileLocation("/home/mereckaj/Dev/ClionProjects/VisionAssignment3/Video/");
 
-void ShowVideo(cv::VideoCapture capture);
+const std::vector<std::vector<int>> groundTruth = {
+        //fps,total frames,object becomes static, object picked up,obj tl x, obj tl y,obj br x, obj br y
+        {25, 717, 183, 509, 356, 208, 390, 239},
+        {25, 692, 215, 551, 287, 261, 352, 323}
+};
+
+std::vector<std::vector<Rect>> resultsEvent(2);
+
+
+void ShowVideo(cv::VideoCapture capture, std::vector<int> t, std::vector<Rect> * event);
 
 int main(int argc, char **argv) {
     cv::VideoCapture *videos = LoadVideos(fileNames, videoFileLocation);
     for (int i = 0; i < fileNames.size(); i++) {
-        ShowVideo(videos[i]);
+        ShowVideo(videos[i], groundTruth[i],&resultsEvent[i]);
     }
-    return 0;
+    for (int i = 0; i < resultsEvent.size(); i++) {
+        for(auto j = 0; j < resultsEvent[i].size();j++){
+            cout << "((" << resultsEvent[i][j].tl().x << "," << resultsEvent[i][j].tl().y << ")";
+            cout << "(" << resultsEvent[i][j].br().x << "," << resultsEvent[i][j].br().y << ")) ";
+        }
+        cout << endl;
+    }
+
+    return EXIT_SUCCESS;
 }
 
 void GetDiff(cv::Mat median_background_image, cv::Mat current_frame, cv::Mat *median_difference) {
@@ -85,58 +101,100 @@ int BoundRectArea(cv::Rect rect) {
     return width * heght;
 }
 
-
-bool CheckIfAbandonedOrRemoved(Mat cur, Mat old) {
-    cv::Mat curEdges, oldEdge;
-    int lowThrs = 1;
-    Sobel(cur,curEdges,cur.depth(),0,1);
-    Sobel(old,oldEdge,old.depth(),0,1);
-    //TODO: histogram diffs
-    convertScaleAbs(curEdges,curEdges);
-    convertScaleAbs(oldEdge,oldEdge);
-    int curEdgesCount = sum(curEdges)[0];
-    int oldEdgesCount = sum(oldEdge)[0];
-    cout << "Cur: " << curEdgesCount << endl;
-    cout << "Old: " << oldEdgesCount << endl;
-    cout << "Diff" << oldEdgesCount-curEdgesCount << endl;
-    cv::waitKey(500);
-    return false;
-}
-
-void ShowVideo(cv::VideoCapture capture) {
+void ShowVideo(cv::VideoCapture capture, std::vector<int> ground, std::vector<Rect> * event){
     cv::Mat currentFrame, medianBackgroundImageSlow, medianBackgroundImageFast, slowDiff,
-            fastDiff, diff, tmp1, tmp2, tmpOriginal,originalBackground;
+            fastDiff, diff, tmp1, tmp2, tmpOriginal, originalBackground;
     int frameNumber = 0;
     int previousBiggestRectSize = 0;
-    bool foundNewObject = true;
+    bool found = false, previousCheck = false;
+
     std::vector<std::vector<cv::Point>> contours;
     std::vector<cv::Point> centresNew, centresOld, centresToDraw;
+
+    /*
+     * Get first frame and blur it to remove noise
+     */
     capture >> currentFrame;
     cv::blur(currentFrame, currentFrame, cv::Size(3, 3));
+
+    /*
+     * Create a copy of the original frame for later use;
+     */
     currentFrame.copyTo(tmpOriginal);
     currentFrame.copyTo(originalBackground);
+
+    /*
+     * Set up a fast and slow learning median background images
+     */
     MedianBackground medianBackgroundSlow(currentFrame, (float) 1.005, 1);
     MedianBackground medianBackgroundFast(currentFrame, (float) 1.05, 1);
-    cv::Rect biggestRect,lastBiggestRect;
+    cv::Rect biggestRect, previousBiggestRect;
+
+    /*
+     * Loop over every frame of the video
+     */
     while (!currentFrame.empty()) {
+
+        /*
+         * Only process every FRAME_SKIP frame (5th)
+         */
         if (frameNumber % FRAME_SKIP == 0) {
+
+            /*
+             * Update the median background with the current frame
+             * Both fast and slow
+             */
             medianBackgroundSlow.UpdateBackground(currentFrame);
             medianBackgroundFast.UpdateBackground(currentFrame);
+
+            /*
+             * Get the new median background images
+             * Both fast and slow
+             */
             medianBackgroundImageSlow = medianBackgroundSlow.GetBackgroundImage();
             medianBackgroundImageFast = medianBackgroundFast.GetBackgroundImage();
+
+            /*
+             * Get the difference between the current frame and the median background
+             *
+             */
             GetDiff(medianBackgroundImageSlow, currentFrame, &slowDiff);
             GetDiff(medianBackgroundImageFast, currentFrame, &fastDiff);
+
+            /*
+             * Get the differnece between the two difference images
+             *
+             * This should give me an image where one median background says there exists a non-background image
+             * and the other one says it doesn't exist there
+             */
             cv::absdiff(slowDiff, fastDiff, diff);
 
-            cv::morphologyEx(diff, tmp1, MORPH_OPEN, cv::Mat());
+            /*
+             * Morph operations to make sure the full bag is shown
+             */
+            cv::morphologyEx(diff, tmp1, MORPH_DILATE, cv::Mat());
             cv::morphologyEx(tmp1, tmp2, MORPH_OPEN, cv::Mat());
-            cv::morphologyEx(tmp2, tmp1, MORPH_CLOSE, cv::Mat());
+            cv::morphologyEx(tmp2, tmp1, MORPH_OPEN, cv::Mat());
+            tmp1 = diff;
+            /*
+             * Get contours of all the objects in the image
+             */
             contours = BinaryToContours(tmp1);
-            cv::drawContours(currentFrame, contours, -1, cv::Scalar(0, 0, 255));
+            /*
+             * Get new centres from the contours and find centres which are the same as the previous frames centres
+             * These will represent objects that have stayed the same over two frames
+             */
             centresNew = GetCentres(contours);
             centresToDraw = GetSameCentres(centresOld, centresNew);
 
-            if (centresToDraw.size() > 0) {
+            /*
+             * If there are more than 0 centres then draw them
+             */
+            if (centresToDraw.size() > 0 && !found) {
+
+                /*
+                 * Find the biggest bounding rectangle
+                 */
                 vector<vector<Point> > contours_poly(contours.size());
                 vector<Rect> boundRect(contours.size());
                 int area = 0;
@@ -144,35 +202,38 @@ void ShowVideo(cv::VideoCapture capture) {
                 for (int i = 0; i < contours.size(); i++) {
                     approxPolyDP(Mat(contours[i]), contours_poly[i], 3, true);
                     boundRect[i] = boundingRect(Mat(contours_poly[i]));
-                    if (BoundRectArea(boundRect[i]) > area) {
+                    int boundRectArea = BoundRectArea(boundRect[i]);
+                    if (boundRectArea > area) {
+                        area = boundRectArea;
                         biggestRect = boundRect[i];
                     }
                 }
-                int val = BoundRectArea(biggestRect);
-                if (previousBiggestRectSize == val && (biggestRect != lastBiggestRect)) {
-                    lastBiggestRect = biggestRect;
-                    //TODO: CHECK THAT NOT THE SAME OBJECT AS LAST FRAME
-                    rectangle(currentFrame, biggestRect.tl(), biggestRect.br(), Scalar(0, 0, 255));
-                    foundNewObject = true;
-                    cout << "Found new object at: (" << biggestRect.tl().x << "," << biggestRect.tl().y << ")," <<
-                    "(" << biggestRect.br().x << ", " << biggestRect.br().y << ")" << endl;
-                    cv::Mat squareCurrent, square50ago;
-                    squareCurrent = tmpOriginal(biggestRect);
-                    square50ago = originalBackground(biggestRect);
-                    bool result;
-                    result = CheckIfAbandonedOrRemoved(squareCurrent, square50ago);
-                    cv::imshow("Slow", currentFrame);
-                    cv::moveWindow("Slow", 0, 0);
-                } else if (previousBiggestRectSize < val) {
-                    foundNewObject = false;
-                } else {
-                    cout << "Finding new object" << endl;
-                }
-                previousBiggestRectSize = val;
-            }
 
-            DrawCentres(centresToDraw, &currentFrame);
-            cv::waitKey(INTER_FRAME_DELAY);
+                /*
+                 * Get the area of the biggest rectangle
+                 */
+                if (previousBiggestRect == biggestRect) {
+                    found = true;
+                }
+                previousBiggestRect = biggestRect;
+
+            } else {
+                if (previousCheck) {
+                    found = false;
+                    previousCheck = false;
+                } else {
+                    previousCheck = true;
+                }
+            }
+            if (found) {
+                Rect overlap = biggestRect & Rect(ground[4], ground[5], ground[6], ground[7]);
+                double coeff = (double) (2 * overlap.area()) /
+                               (double) (biggestRect.area() + Rect(ground[4], ground[5], ground[6], ground[7]).area());
+                event->push_back(biggestRect);
+                cout << "Coeff: " << coeff << endl;
+//                cout << "FN: " << frameNumber << endl;
+                rectangle(currentFrame, biggestRect.tl(), biggestRect.br(), cv::Scalar(0, 0, 255));
+            }
             diff = Mat::zeros(diff.size(), diff.type());
             centresOld = centresNew;
         }
@@ -182,4 +243,3 @@ void ShowVideo(cv::VideoCapture capture) {
         currentFrame.copyTo(tmpOriginal);
     }
 }
-
